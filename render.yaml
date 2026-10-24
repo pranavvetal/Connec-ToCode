@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: connec-to-code
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: OPENROUTER_MODEL
+        value: meta-llama/llama-3.1-70b-instruct
