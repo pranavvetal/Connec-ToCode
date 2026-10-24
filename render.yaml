@@ -3,10 +3,22 @@ services:
     name: connec-to-code
     runtime: node
     plan: free
-    buildCommand: npm install && npm run build
+    buildCommand: npm install && npx prisma generate && npm run build
     startCommand: npm start
     envVars:
       - key: NODE_ENV
         value: production
       - key: OPENROUTER_MODEL
         value: meta-llama/llama-3.1-70b-instruct
+      - key: DATABASE_URL
+        fromDatabase:
+          name: connec-to-code-db
+          property: connectionString
+      - key: REDIS_URL
+        sync: false
+
+databases:
+  - name: connec-to-code-db
+    plan: free
+    databaseName: connectocode
+    user: postgres

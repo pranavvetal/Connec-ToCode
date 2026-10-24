@@ -5,6 +5,10 @@ import dotenv from 'dotenv';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
+import { initDb, saveRoundToDb, getCompetitionHistoryFromDb, isDbConnected, seedChallengesToDb, getChallengesFromDb } from './storage/db.mjs';
+import { initRoomStore, saveRoom, deleteRoom, getRoomsMap, isRedisConnected } from './storage/roomStore.mjs';
+import { CHALLENGES, getAllChallenges, getChallengeById, sanitizeChallenge } from './challenges/catalog.mjs';
+import { scorePromptRubric, evaluateCodeAgainstTests, computeFinalScore, runTestLocally } from './scoring/evaluator.mjs';
 
 dotenv.config();
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -51,97 +55,22 @@ app.use('/api/run', createRateLimiter({ windowMs: 60_000, max: 40, message: 'Too
 app.use('/api/ai', createRateLimiter({ windowMs: 60_000, max: 20, message: 'Too many AI requests. Please wait a moment.' }));
 app.use('/api/rooms', createRateLimiter({ windowMs: 60_000, max: 40, message: 'Too many room creation requests.' }));
 app.use('/api', createRateLimiter({ windowMs: 60_000, max: 200, message: 'Too many API requests.' }));
-const rooms = new Map();
+const rooms = getRoomsMap();
 const historyFile = path.join(here, 'data', 'competition-history.json');
 let competitionHistory = [];
 try { competitionHistory = JSON.parse(await fs.readFile(historyFile, 'utf8')); } catch { competitionHistory = []; }
 
-const challenges = [
-  {
-    id: 'two-sum',
-    title: 'Solve Two Sum in one pass',
-    difficulty: 'Easy',
-    category: 'Algorithms · Hash Map',
-    description: 'Given an integer array and a target, return the indices of two values that add to the target. Handle duplicates and negative values. Aim for O(n) time and explain edge cases.',
-    starterPrompt: 'Write a function that finds two numbers in an array that add up to a target sum in O(n) time. Handle duplicates, negative numbers, and empty input.',
-    durationMs: 300000
-  },
-  {
-    id: 'valid-palindrome',
-    title: 'Valid Palindrome with Transformations',
-    difficulty: 'Easy',
-    category: 'Algorithms · Strings',
-    description: 'Given a string with punctuation, spaces, and mixed case, determine whether it reads the same backward after normalizing non-alphanumeric characters. Aim for O(1) auxiliary space and explain boundary cases.',
-    starterPrompt: 'Write a function that checks if a string is a palindrome, ignoring non-alphanumeric characters and casing with O(1) extra space.',
-    durationMs: 300000
-  },
-  {
-    id: 'merge-intervals',
-    title: 'Merge Overlapping Intervals',
-    difficulty: 'Medium',
-    category: 'Algorithms · Intervals',
-    description: 'Given a collection of intervals, merge all overlapping intervals into non-overlapping spans. Handle unsorted inputs, single-point spans (e.g., [4,4]), and boundary conditions in O(n log n) time.',
-    starterPrompt: 'Write an algorithm to merge overlapping intervals. Handle unsorted intervals and edge cases like empty inputs or adjacent intervals.',
-    durationMs: 300000
-  },
-  {
-    id: 'lru-cache',
-    title: 'Design an LRU Cache',
-    difficulty: 'Medium',
-    category: 'Data Structures · O(1) Ops',
-    description: 'Design a Least Recently Used (LRU) cache with a fixed capacity supporting get(key) and put(key, value) operations in O(1) average time. Clearly outline node eviction and update semantics.',
-    starterPrompt: 'Implement an LRU Cache with get and put operations in O(1) time. Include capacity eviction and handle duplicate keys.',
-    durationMs: 300000
-  },
-  {
-    id: 'sliding-window-substring',
-    title: 'Longest Substring Without Repeating Characters',
-    difficulty: 'Medium',
-    category: 'Algorithms · Sliding Window',
-    description: 'Given a string, find the length and value of the longest substring containing all unique characters. Optimize with a sliding window approach achieving O(n) runtime and minimal space overhead.',
-    starterPrompt: 'Find the length of the longest substring without repeating characters using a sliding window. Explain space complexity.',
-    durationMs: 300000
-  },
-  {
-    id: 'debounce-throttle',
-    title: 'Debounce & Throttle with Cancellation',
-    difficulty: 'Medium',
-    category: 'Web · Async JavaScript',
-    description: 'Implement production-ready debounce and throttle utilities with configurable leading/trailing execution triggers and an explicit cancel() handle. Provide TypeScript signatures and edge-case guards.',
-    starterPrompt: 'Implement debounce and throttle functions with options for immediate execution and cancellation. Write clean types.',
-    durationMs: 300000
-  },
-  {
-    id: 'async-task-queue',
-    title: 'Async Task Pool with Concurrency Limit',
-    difficulty: 'Hard',
-    category: 'Concurrency · Promises',
-    description: 'Build a concurrency-limited task runner that executes an arbitrary number of promise-returning factories with a fixed pool size (e.g. limit = 3). Handle rejections without stalling the queue and return results in order.',
-    starterPrompt: 'Write a concurrency-limited promise pool function that runs tasks with a maximum concurrency limit and collects all results.',
-    durationMs: 300000
-  },
-  {
-    id: 'deep-clone-circular',
-    title: 'Deep Clone with Circular References & Built-ins',
-    difficulty: 'Hard',
-    category: 'Practical · Metaprogramming',
-    description: 'Write a robust deep clone function that handles nested plain objects, arrays, Date, RegExp, Map, Set, and resolves circular references without stack overflows. Compare against structuredClone.',
-    starterPrompt: 'Create a deep clone function that handles circular references, Maps, Sets, and Dates without stack overflow.',
-    durationMs: 300000
-  }
-];
-
+let challenges = getAllChallenges({ sanitize: true });
 const challenge = { ...challenges[0] };
-const scorePrompt = prompt => {
-  const text = prompt.toLowerCase();
-  const words = prompt.trim().split(/\s+/).filter(Boolean);
-  const detail = Math.min(25, Math.floor(words.length / 3));
-  const constraints = Math.min(20, (text.match(/\b(edge case|constraint|memory|time|complexity|efficient|O\(|limit|input|output)\b/g) || []).length * 4);
-  const tests = Math.min(20, (text.match(/\b(example|test|empty|null|duplicate|negative|large|boundary)\b/g) || []).length * 5);
-  const structure = Math.min(20, (text.match(/\b(steps|algorithm|return|function|language|explain|format|assume|validate)\b/g) || []).length * 4);
-  const concise = Math.max(0, 15 - Math.floor(Math.max(0, words.length - 140) / 8));
-  return { total: Math.min(100, detail + constraints + tests + structure + concise), detail, constraints, tests, structure, concise };
-};
+const scorePrompt = scorePromptRubric;
+
+function sortLeaderboard(players) {
+  return [...players].sort((a, b) => {
+    if (b.points !== a.points) return b.points - a.points; // 1. higher score
+    if ((a.submissions || 0) !== (b.submissions || 0)) return (a.submissions || 0) - (b.submissions || 0); // 2. fewer attempts
+    return (a.firstSubmission || 0) - (b.firstSubmission || 0); // 3. earlier submission
+  });
+}
 function starterFromPrompt(prompt, language) {
   const safe=prompt.trim().replace(/\*\//g,'* /').replace(/[\r\n]+/g,' ').slice(0,700);
   const templates={
@@ -175,21 +104,135 @@ async function saveHistory(round) {
   competitionHistory.push(round); competitionHistory=competitionHistory.slice(-300);
   await fs.mkdir(path.dirname(historyFile), { recursive: true });
   const temp = `${historyFile}.tmp`; await fs.writeFile(temp, JSON.stringify(competitionHistory,null,2)); await fs.rename(temp,historyFile);
+  await saveRoundToDb(round);
 }
 const normalizeRoom = value => String(value || '').trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '').slice(0, 20);
 const initialCode = `// Build something great, together.\n\nfunction greet(name) {\n  return \`Hello, \${name}!\`;\n}\n\nconsole.log(greet("Connec-ToCode"));\n`;
-function getRoom(id) {
-  if (!rooms.has(id)) rooms.set(id, { code: initialCode, language: 'javascript', version: 0, snapshots: [], members: new Map(), messages: [], challenge: { ...challenge }, round: null, submissions: [], points: new Map(), finished: null, host: null, cleanupTimer: null });
+
+function finalizeRound(roomId, room) {
+  if (!room.round || room.round.endedAt) return;
+  room.round.endedAt = Date.now();
+  const players = sortLeaderboard([...room.points.values()]);
+  const winner = players[0] || null;
+  room.finished = { winner: winner?.name || 'No winner', points: winner?.points || 0, endedAt: Date.now() };
+  const features = [...room.points.values()].map(player=>({name:player.name,values:[player.points/100,player.bestScore/100,player.submissions/5,Math.min(1,player.improved),1],winner:player.id===winner?.id}));
+  saveHistory({
+    roomId,
+    challenge: room.challenge?.title || 'Coding Challenge',
+    startedAt: room.round.startedAt,
+    endedAt: room.round.endedAt,
+    winner: winner?.name || null,
+    points: winner?.points || 0,
+    participants: [...new Set([...room.submissions.map(s=>s.author), ...[...room.members.values()].map(m=>m.name)])],
+    submissions: room.submissions,
+    features
+  });
+  saveRoom(roomId, room);
+  io.to(roomId).emit('competition:state', roomSummary(roomId, room));
+}
+
+function scheduleRoundTimer(roomId, room) {
+  if (!room.round || room.round.endedAt) return;
+  if (room.roundTimer) clearTimeout(room.roundTimer);
+  const roundId = room.round.startedAt;
+  const remainingMs = Math.max(0, room.round.endsAt - Date.now());
+  if (remainingMs === 0) {
+    finalizeRound(roomId, room);
+    return;
+  }
+  room.roundTimer = setTimeout(() => {
+    if (room.round?.startedAt !== roundId || room.round.endedAt) return;
+    finalizeRound(roomId, room);
+  }, remainingMs);
+  room.roundTimer.unref?.();
+}
+
+function getRoom(id, options = {}) {
+  if (!rooms.has(id)) {
+    let picked = null;
+    if (options.challengeId) {
+      picked = getChallengeById(options.challengeId, { sanitize: false });
+    } else if (options.difficulty) {
+      const match = CHALLENGES.filter(c => c.difficulty.toLowerCase() === String(options.difficulty).toLowerCase());
+      if (match.length) picked = match[0];
+    }
+    if (!picked) picked = CHALLENGES[0];
+
+    const dur = Math.max(60, Math.min(1800, Number(options.durationSeconds) || (picked.durationMs ? Math.round(picked.durationMs / 1000) : 300)));
+    const newRoom = {
+      code: picked.starterCode || initialCode,
+      language: picked.language || 'javascript',
+      version: 0,
+      snapshots: [],
+      members: new Map(),
+      messages: [],
+      challenge: sanitizeChallenge(picked),
+      durationSeconds: dur,
+      round: null,
+      submissions: [],
+      points: new Map(),
+      finished: null,
+      host: null,
+      cleanupTimer: null,
+      roundTimer: null
+    };
+    rooms.set(id, newRoom);
+    saveRoom(id, newRoom);
+  }
   return rooms.get(id);
 }
 function roomSummary(id, room) {
-  return { roomId: id, code: room.code, language: room.language, version: room.version || 0, serverTime: Date.now(), snapshots: room.snapshots.slice(-30), messages: room.messages.slice(-100), members: [...room.members.values()], challenge: room.challenge || challenges[0], challenges, round: room.round, submissions: room.submissions.slice(-30), leaderboard: [...room.points.values()].sort((a,b)=>b.points-a.points), prediction: predictWinner([...room.points.values()]), finished: room.finished };
+  const currentChallenge = room.challenge ? sanitizeChallenge(room.challenge) : challenges[0];
+  const sortedLeaderboard = sortLeaderboard([...room.points.values()]);
+  return {
+    roomId: id,
+    code: room.code,
+    language: room.language,
+    version: room.version || 0,
+    serverTime: Date.now(),
+    snapshots: room.snapshots.slice(-30),
+    messages: room.messages.slice(-100),
+    members: [...room.members.values()],
+    challenge: currentChallenge,
+    challenges: getAllChallenges({ sanitize: true }),
+    round: room.round,
+    submissions: room.submissions.slice(-30),
+    leaderboard: sortedLeaderboard,
+    prediction: predictWinner(sortedLeaderboard),
+    finished: room.finished
+  };
 }
 
-app.get('/api/challenges', (_req, res) => res.json({ challenges }));
+await initDb();
+await seedChallengesToDb(CHALLENGES);
+const dbChallenges = await getChallengesFromDb();
+if (dbChallenges && dbChallenges.length > 0) {
+  challenges = dbChallenges.map(sanitizeChallenge);
+} else {
+  challenges = getAllChallenges({ sanitize: true });
+}
+const initialDbHistory = await getCompetitionHistoryFromDb(100);
+if (initialDbHistory && initialDbHistory.length > 0) {
+  competitionHistory = initialDbHistory;
+}
+await initRoomStore({
+  defaultChallenge: challenges[0],
+  initialCode,
+  onRestoreRound: (roomId, room) => {
+    scheduleRoundTimer(roomId, room);
+  }
+});
 
-app.get('/api/health', (_req, res) => res.json({ ok: true, service: 'Connec-ToCode', rooms: rooms.size, aiConfigured: Boolean(process.env.OPENROUTER_API_KEY), runner: process.env.PISTON_URL ? 'piston' : 'judge0', turnConfigured: Boolean(process.env.ICE_TURN_URL && process.env.ICE_TURN_USERNAME && process.env.ICE_TURN_CREDENTIAL) }));
-app.get('/api/competition-history', (_req, res) => res.json({ rounds: competitionHistory.slice(-100).reverse() }));
+app.get('/api/challenges', (_req, res) => res.json({ challenges: getAllChallenges({ sanitize: true }) }));
+
+app.get('/api/health', (_req, res) => res.json({ ok: true, service: 'Connec-ToCode', rooms: rooms.size, aiConfigured: Boolean(process.env.OPENROUTER_API_KEY), runner: process.env.PISTON_URL ? 'piston' : 'judge0', turnConfigured: Boolean(process.env.ICE_TURN_URL && process.env.ICE_TURN_USERNAME && process.env.ICE_TURN_CREDENTIAL), dbConnected: isDbConnected(), redisConnected: isRedisConnected() }));
+app.get('/api/competition-history', async (_req, res) => {
+  const dbRounds = await getCompetitionHistoryFromDb(100);
+  if (dbRounds) {
+    return res.json({ rounds: dbRounds });
+  }
+  res.json({ rounds: competitionHistory.slice(-100).reverse() });
+});
 app.get('/api/ice-config', (_req, res) => {
   const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
   if (process.env.ICE_TURN_URL && process.env.ICE_TURN_USERNAME && process.env.ICE_TURN_CREDENTIAL) {
@@ -197,10 +240,11 @@ app.get('/api/ice-config', (_req, res) => {
   }
   res.json({ iceServers });
 });
-app.post('/api/rooms', (_req, res) => {
+app.post('/api/rooms', (req, res) => {
   const id = `TEAM-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
-  getRoom(id);
-  res.status(201).json({ roomId: id });
+  const { challengeId, difficulty, durationSeconds } = req.body || {};
+  const room = getRoom(id, { challengeId, difficulty, durationSeconds });
+  res.status(201).json({ roomId: id, challenge: room.challenge, durationSeconds: room.durationSeconds });
 });
 app.get('/api/room-status/:roomId', (req, res) => {
   const id = normalizeRoom(req.params.roomId);
@@ -314,6 +358,7 @@ io.on('connection', socket => {
     room.members.set(socket.id, member);
     socket.join(id);
     if (!room.host) room.host = socket.id;
+    saveRoom(id, room);
     ack({ ...roomSummary(id, room), selfId: socket.id, isHost: room.host === socket.id });
     socket.to(id).emit('room:member-joined', member);
     io.to(id).emit('room:members', [...room.members.values()]);
@@ -325,6 +370,7 @@ io.on('connection', socket => {
     room.code = code;
     room.version = (room.version || 0) + 1;
     if (typeof language === 'string') room.language = language.slice(0, 24);
+    saveRoom(currentRoom, room);
     socket.to(currentRoom).emit('code:change', { code: room.code, language: room.language, by: socket.id, version: room.version });
   });
   socket.on('chat:send', ({ text } = {}, ack = () => {}) => {
@@ -334,6 +380,7 @@ io.on('connection', socket => {
     const message = { id: `${Date.now()}-${socket.id}`, user: room.members.get(socket.id)?.name || 'Teammate', text: text.trim(), time: Date.now() };
     room.messages.push(message);
     room.messages = room.messages.slice(-100);
+    saveRoom(currentRoom, room);
     io.to(currentRoom).emit('chat:message', message);
     ack({ ok: true });
   });
@@ -344,6 +391,7 @@ io.on('connection', socket => {
     const snap = { code, language: language || room.language, time: Date.now(), by: room.members.get(socket.id)?.name || 'Teammate' };
     room.snapshots.push(snap);
     room.snapshots = room.snapshots.slice(-30);
+    saveRoom(currentRoom, room);
     io.to(currentRoom).emit('room:snapshot-added', snap);
     ack({ ok: true });
   });
@@ -355,9 +403,16 @@ io.on('connection', socket => {
     if (room.round && !room.round.endedAt && Date.now() < room.round.endsAt) {
       return ack?.({ error: 'Cannot change challenge while a round is in progress.' });
     }
-    const chosen = challenges.find(c => c.id === challengeId);
+    const chosen = getChallengeById(challengeId, { sanitize: true });
     if (!chosen) return ack?.({ error: 'Invalid challenge selected.' });
     room.challenge = { ...chosen };
+    if (chosen.starterCode) {
+      room.code = chosen.starterCode;
+      room.language = chosen.language || room.language;
+      room.version = (room.version || 0) + 1;
+      io.to(currentRoom).emit('code:change', { code: room.code, language: room.language, by: socket.id, version: room.version });
+    }
+    saveRoom(currentRoom, room);
     io.to(currentRoom).emit('competition:state', roomSummary(currentRoom, room));
     ack?.({ ok: true, challenge: room.challenge });
   });
@@ -368,23 +423,22 @@ io.on('connection', socket => {
     if (room.host !== socket.id) return ack({ error: 'Only the room host can start a new round.' });
     if (room.round && !room.round.endedAt && Date.now() < room.round.endsAt) return ack({ error: 'A round is already in progress.' });
     if (challengeId) {
-      const chosen = challenges.find(c => c.id === challengeId);
-      if (chosen) room.challenge = { ...chosen };
+      const chosen = getChallengeById(challengeId, { sanitize: true });
+      if (chosen) {
+        room.challenge = { ...chosen };
+        if (chosen.starterCode && !room.code) {
+          room.code = chosen.starterCode;
+          room.language = chosen.language || room.language;
+        }
+      }
     }
-    const seconds = Math.max(process.env.NODE_ENV === 'test' ? 1 : 60, Math.min(900, Number(durationSeconds) || 300));
+    const duration = Number(durationSeconds) || (room.durationSeconds || Math.round((room.challenge?.durationMs || 300_000) / 1000));
+    const seconds = Math.max(process.env.NODE_ENV === 'test' ? 1 : 60, Math.min(900, duration));
     room.submissions = []; room.points.clear(); room.finished = null;
     room.round = { startedAt: Date.now(), endsAt: Date.now() + seconds * 1000, durationSeconds: seconds };
+    saveRoom(currentRoom, room);
     io.to(currentRoom).emit('competition:state', roomSummary(currentRoom, room)); ack({ ok: true, round: room.round, serverTime: Date.now() });
-    const roundId=room.round.startedAt;
-    const roundTimer=setTimeout(async () => {
-      if (room.round?.startedAt !== roundId || room.round.endedAt) return;
-      room.round.endedAt = Date.now();
-      const players = [...room.points.values()].sort((a,b)=>b.points-a.points || b.bestScore-a.bestScore || a.firstSubmission-b.firstSubmission);
-      const winner = players[0] || null; room.finished = { winner: winner?.name || 'No winner', points: winner?.points || 0, endedAt: Date.now() };
-      const features = [...room.points.values()].map(player=>({name:player.name,values:[player.points/100,player.bestScore/100,player.submissions/5,Math.min(1,player.improved),1],winner:player.id===winner?.id}));
-      await saveHistory({ roomId: currentRoom, challenge: room.challenge.title, startedAt: room.round.startedAt, endedAt: room.round.endedAt, winner: winner?.name || null, points: winner?.points || 0, participants: [...new Set([...room.submissions.map(s=>s.author), ...[...room.members.values()].map(m=>m.name)])], features });
-      io.to(currentRoom).emit('competition:state', roomSummary(currentRoom, room));
-    }, seconds * 1000); roundTimer.unref?.();
+    scheduleRoundTimer(currentRoom, room);
   });
   socket.on('competition:submit', async ({ prompt, language = 'javascript' } = {}, ack = () => {}) => {
     if (!currentRoom) return ack({ error: 'Join a room first.' });
@@ -393,8 +447,7 @@ io.on('connection', socket => {
     if (!room) return ack({ error: 'Room not found.' });
     if (!room.round || room.round.endedAt || now >= room.round.endsAt) return ack({ error: 'The prompt round is not running. Start a round to compete.' });
     const member = room.members.get(socket.id); if (!member) return ack({ error: 'Rejoin the room to submit.' });
-    const score = scorePrompt(prompt.trim()); const prior = room.submissions.filter(item=>item.authorId===socket.id);
-    const bestBefore = room.points.get(socket.id)?.bestScore || 0; const improved = score.total > bestBefore;
+
     let code;
     if (process.env.OPENROUTER_API_KEY) {
       try {
@@ -405,12 +458,54 @@ io.on('connection', socket => {
     } else {
       code=starterFromPrompt(prompt,language);
     }
-    const participant=room.points.get(socket.id)||{id:socket.id,name:member.name,points:0,bestScore:0,submissions:0,improved:0,firstSubmission:now};
-    const improvement=Math.max(0,score.total-bestBefore); const points=score.total + Math.min(20,improvement);
-    participant.points+=points; participant.bestScore=Math.max(bestBefore,score.total); participant.submissions++; if(improved&&prior.length)participant.improved++; room.points.set(socket.id,participant);
-    const submission={id:`${now}-${socket.id}`,authorId:socket.id,author:member.name,prompt:prompt.trim(),language,code,score,points,improved,createdAt:now};
-    room.submissions.push(submission); room.submissions=room.submissions.slice(-100); room.code=code; room.language=language; room.version = (room.version || 0) + 1;
-    const state=roomSummary(currentRoom,room); io.to(currentRoom).emit('competition:submission', {submission,state}); io.to(currentRoom).emit('code:change',{code,language,by:socket.id,version:room.version}); ack({ok:true,submission,state});
+
+    const fullChallenge = getChallengeById(room.challenge?.id, { sanitize: false });
+    const runner = (process.env.NODE_ENV === 'test' || (!process.env.JUDGE0_URL && !process.env.PISTON_URL))
+      ? null
+      : (lang, codeStr, stdin) => (process.env.PISTON_URL ? runWithPiston(lang, codeStr, stdin) : runWithJudge0(lang, codeStr, stdin));
+    const testEval = await evaluateCodeAgainstTests(language, code, fullChallenge, { runnerFn: runner });
+    const promptRubric = scorePromptRubric(prompt.trim());
+
+    const participant = room.points.get(socket.id) || { id: socket.id, name: member.name, points: 0, bestScore: 0, submissions: 0, improved: 0, firstSubmission: now };
+    const previousBest = participant.bestScore || 0;
+    const finalScore = computeFinalScore({
+      prompt: prompt.trim(),
+      promptRubric,
+      testEval,
+      previousBestScore: previousBest
+    });
+
+    const improved = finalScore.total > previousBest;
+    participant.points += finalScore.total;
+    participant.bestScore = Math.max(previousBest, finalScore.total);
+    participant.submissions++;
+    if (improved && participant.submissions > 1) participant.improved++;
+    room.points.set(socket.id, participant);
+
+    const submission = {
+      id: `${now}-${socket.id}`,
+      authorId: socket.id,
+      author: member.name,
+      prompt: prompt.trim(),
+      language,
+      code,
+      score: finalScore,
+      points: finalScore.total,
+      improved,
+      passedTests: testEval.passedCount,
+      totalTests: testEval.totalTests,
+      createdAt: now
+    };
+    room.submissions.push(submission);
+    room.submissions = room.submissions.slice(-100);
+    room.code = code;
+    room.language = language;
+    room.version = (room.version || 0) + 1;
+    saveRoom(currentRoom, room);
+    const state = roomSummary(currentRoom, room);
+    io.to(currentRoom).emit('competition:submission', { submission, state });
+    io.to(currentRoom).emit('code:change', { code, language, by: socket.id, version: room.version });
+    ack({ ok: true, submission, state });
   });
   socket.on('voice:signal', ({ to, signal } = {}) => {
     if (currentRoom && typeof to === 'string' && signal && typeof signal === 'object') {
@@ -431,13 +526,16 @@ io.on('connection', socket => {
         if (room.cleanupTimer) clearTimeout(room.cleanupTimer);
         const hasActivity = room.messages.length || room.snapshots.length || room.submissions.length;
         if (!hasActivity) {
-          rooms.delete(currentRoom);
+          deleteRoom(currentRoom);
         } else {
+          saveRoom(currentRoom, room);
           room.cleanupTimer = setTimeout(() => {
-            if (room.members.size === 0) rooms.delete(currentRoom);
+            if (room.members.size === 0) deleteRoom(currentRoom);
           }, 15 * 60_000);
           room.cleanupTimer.unref?.();
         }
+      } else {
+        saveRoom(currentRoom, room);
       }
     }
   });

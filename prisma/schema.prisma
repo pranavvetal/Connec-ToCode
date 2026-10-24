@@ -1,0 +1,121 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id           String        @id @default(cuid())
+  name         String
+  color        String?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  participants Participant[]
+  submissions  Submission[]
+  winners      Winner[]
+
+  @@index([name])
+}
+
+model Room {
+  id             String    @id
+  code           String    @default("")
+  language       String    @default("javascript")
+  version        Int       @default(0)
+  challengeId    String?
+  challengeTitle String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  rounds         Round[]
+}
+
+model Round {
+  id              String        @id @default(cuid())
+  roomId          String
+  room            Room          @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  challengeId     String?
+  challengeTitle  String
+  startedAt       BigInt
+  endsAt          BigInt
+  endedAt         BigInt?
+  durationSeconds Int           @default(300)
+  createdAt       DateTime      @default(now())
+  participants    Participant[]
+  submissions     Submission[]
+  winner          Winner?
+
+  @@index([roomId])
+}
+
+model Participant {
+  id              String   @id @default(cuid())
+  roundId         String
+  round           Round    @relation(fields: [roundId], references: [id], onDelete: Cascade)
+  userId          String?
+  user            User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  name            String
+  points          Int      @default(0)
+  bestScore       Int      @default(0)
+  submissions     Int      @default(0)
+  improved        Int      @default(0)
+  firstSubmission BigInt?
+  createdAt       DateTime @default(now())
+
+  @@index([roundId])
+}
+
+model Submission {
+  id             String   @id @default(cuid())
+  roundId        String
+  round          Round    @relation(fields: [roundId], references: [id], onDelete: Cascade)
+  userId         String?
+  user           User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  authorId       String
+  author         String
+  prompt         String
+  language       String   @default("javascript")
+  code           String
+  score          Int      @default(0)
+  scoreBreakdown Json?
+  points         Int      @default(0)
+  improved       Boolean  @default(false)
+  timestamp      BigInt
+  createdAt      DateTime @default(now())
+
+  @@index([roundId])
+  @@index([author])
+}
+
+model Winner {
+  id        String   @id @default(cuid())
+  roundId   String   @unique
+  round     Round    @relation(fields: [roundId], references: [id], onDelete: Cascade)
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  name      String
+  points    Int      @default(0)
+  endedAt   BigInt
+  createdAt DateTime @default(now())
+}
+
+model Challenge {
+  id              String   @id
+  title           String
+  description     String
+  difficulty      String
+  category        String
+  starterCode     String   @default("")
+  starterPrompt   String   @default("")
+  language        String   @default("javascript")
+  durationMs      Int      @default(300000)
+  visibleExamples Json
+  hiddenTests     Json
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([difficulty])
+  @@index([category])
+}

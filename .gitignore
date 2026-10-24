@@ -8,3 +8,5 @@ npm-debug.log*
 
 server/data/competition-history.json
 logs/
+server/data/rooms-cache.json
+server/data/*.tmp

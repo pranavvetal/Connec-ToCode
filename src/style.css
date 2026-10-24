@@ -100,4 +100,11 @@ body{background:#f4f7fd;color:#263652;font-family:var(--sans);font-size:14px;-we
 .ide-dark .challenge-card p{color:#9ab0ce}
 .ide-dark .active-tag{color:#85cf8a}
 
-@media(max-width:640px){.challenge-list{grid-template-columns:1fr}}
+.room-creation-options{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:6px 0 2px}
+.room-creation-options.full-width{grid-column:1/-1}
+.room-select-group{display:flex;flex-direction:column;gap:4px}
+.room-select-group label{color:#516582;font-size:9px;letter-spacing:.08em;font-weight:700}
+.room-select-group select{height:40px;padding:0 10px;border:1px solid #d5e0f0;border-radius:5px;background:#fff;color:#243651;font-size:12px;outline:none}
+.room-select-group select:focus{border-color:#7393df;box-shadow:0 0 0 3px #7393df25}
+
+@media(max-width:640px){.challenge-list{grid-template-columns:1fr}.room-creation-options{grid-template-columns:1fr}}

@@ -10,15 +10,22 @@
     "dev": "vite",
     "dev:all": "node server/dev.mjs",
     "build": "vite build",
+    "test": "node server/scoring/evaluator.test.mjs",
     "test:smoke": "node server/smoke.mjs",
     "preview": "vite preview",
     "server": "node server/index.mjs",
-    "start": "node server/index.mjs"
+    "start": "node server/index.mjs",
+    "postinstall": "prisma generate",
+    "db:generate": "prisma generate",
+    "db:push": "prisma db push",
+    "db:import": "node server/scripts/import-history.mjs"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
+    "@prisma/client": "^6.19.3",
     "dotenv": "^17.2.4",
     "express": "^5.2.1",
+    "ioredis": "^6.0.0",
     "lucide-react": "^0.563.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
@@ -31,6 +38,7 @@
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^5.0.0",
+    "prisma": "^6.19.3",
     "typescript": "~5.8.2",
     "vite": "^6.2.0"
   },
